@@ -183,7 +183,7 @@ python -m tests.test_persistence
 ## 🎓 Internship Project Metadata
 
 - **Program**: Infosys Springboard Virtual Internship 7.0
-- **Domain**: Artificial Intelligence & Enterprise Risk Analytics
+- **Domain**: Artificial Intelligence
 - **Project Title**: Agentic AI for Safety Monitoring with Construction Risk Analytics
 - **Author**: Medarametla Yogendra
 - **Status**: Completed & Evaluated
