@@ -1,0 +1,275 @@
+from datetime import date
+
+import pandas as pd
+import streamlit as st
+
+from database.db import session_scope
+from database.models import Project, Milestone, TeamAssignment, Document, User, ActivityLog
+from auth.auth_utils import current_user
+from config import BUILDING_TYPES, CONSTRUCTION_STYLES, MATERIAL_QUALITY_LEVELS, PROJECT_STATUSES
+from utils.styling import section_header, status_badge, status_kind_for_project, card_open, card_close
+
+
+def _new_project_code(db):
+    n = db.query(Project).count() + 1
+    return f"PRJ-{1000 + n}"
+
+
+def render():
+    section_header("Project Management", "Create, track and manage every project in one place")
+
+    tab_list, tab_new = st.tabs(["📋 All Projects", "➕ Create Project"])
+
+    with tab_new:
+        with st.form("create_project_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                name = st.text_input("Project Name *")
+                client_name = st.text_input("Client Name")
+                location = st.text_input("Location")
+                building_type = st.selectbox("Building Type", BUILDING_TYPES)
+                construction_style = st.selectbox("Construction Style", CONSTRUCTION_STYLES)
+                quality = st.selectbox("Material Quality", MATERIAL_QUALITY_LEVELS, index=1)
+            with c2:
+                plot_size = st.number_input("Plot Size (sqft)", min_value=100.0, value=1500.0, step=50.0)
+                floors = st.number_input("Number of Floors", min_value=1, value=2, step=1)
+                bedrooms = st.number_input("Bedrooms", min_value=0, value=3, step=1)
+                bathrooms = st.number_input("Bathrooms", min_value=0, value=2, step=1)
+                parking = st.number_input("Parking Spots", min_value=0, value=1, step=1)
+                budget_total = st.number_input("Total Budget (₹)", min_value=0.0, value=1500000.0, step=10000.0)
+            c3, c4 = st.columns(2)
+            with c3:
+                start = st.date_input("Start Date", value=date.today())
+            with c4:
+                expected = st.date_input("Expected Completion", value=date.today())
+
+            submitted = st.form_submit_button("Create Project", type="primary")
+            if submitted:
+                if not name:
+                    st.error("Project name is required.")
+                elif not start or not expected:
+                    st.error("Please select both a start date and an expected completion date.")
+                elif expected <= start:
+                    st.error("Expected completion must be after the start date.")
+                else:
+                    with session_scope() as db:
+                        user = current_user()
+                        p = Project(
+                            project_code=_new_project_code(db), name=name, client_name=client_name,
+                            location=location, building_type=building_type, construction_style=construction_style,
+                            plot_size_sqft=plot_size, floors=int(floors), bedrooms=int(bedrooms),
+                            bathrooms=int(bathrooms), kitchens=1, parking_spots=int(parking),
+                            material_quality=quality, budget_total=budget_total, budget_used=0,
+                            start_date=start, expected_completion=expected, status="Planning",
+                            progress_percent=0, risk_score=0, created_by=user.get("id"),
+                        )
+                        db.add(p)
+                        db.flush()
+                        from utils.project_setup import bootstrap_new_project
+                        bootstrap_new_project(db, p)
+                        db.add(ActivityLog(user_id=user.get("id"), project_id=p.id, action=f"Created project '{name}'"))
+                    st.success(f"Project '{name}' created.")
+                    st.rerun()
+
+    with tab_list:
+        col_search, col_filter, col_archived = st.columns([2, 1.2, 1])
+        with col_search:
+            search = st.text_input("🔍 Search projects", placeholder="Search by name, code or client...")
+        with col_filter:
+            status_filter = st.selectbox("Status", ["All"] + PROJECT_STATUSES)
+        with col_archived:
+            show_archived = st.checkbox("Show archived", value=False)
+
+        with session_scope() as db:
+            q = db.query(Project)
+            if not show_archived:
+                q = q.filter(Project.is_archived == False)  # noqa: E712
+            projects = q.order_by(Project.created_at.desc()).all()
+
+            if search:
+                s = search.lower()
+                projects = [p for p in projects if s in p.name.lower() or s in p.project_code.lower() or s in (p.client_name or "").lower()]
+            if status_filter != "All":
+                projects = [p for p in projects if p.status == status_filter]
+
+            if not projects:
+                st.info("No projects match your filters.")
+            else:
+                for p in projects:
+                    with st.container(border=True):
+                        c1, c2, c3, c4, c5 = st.columns([2.6, 1.1, 1.3, 1.3, 1])
+                        with c1:
+                            st.markdown(f"**{p.name}**  <span class='cih-muted'>· {p.project_code}</span>", unsafe_allow_html=True)
+                            st.markdown(f'<span class="cih-muted">{p.client_name or "—"} · {p.location or "—"}</span>', unsafe_allow_html=True)
+                        with c2:
+                            st.markdown(status_badge(p.status, status_kind_for_project(p.status)), unsafe_allow_html=True)
+                        with c3:
+                            st.progress(min(int(p.progress_percent), 100) / 100)
+                            st.caption(f"{p.progress_percent:.0f}% complete")
+                        with c4:
+                            st.caption(f"₹{p.budget_used:,.0f} / ₹{p.budget_total:,.0f}")
+                        with c5:
+                            if st.button("View", key=f"view_{p.id}", use_container_width=True):
+                                st.session_state["active_project_id"] = p.id
+                                st.session_state["project_detail_open"] = True
+                                st.rerun()
+                    st.write("")
+
+        if st.session_state.get("project_detail_open"):
+            _project_detail(st.session_state.get("active_project_id"))
+
+
+def _project_detail(project_id):
+    with session_scope() as db:
+        p = db.query(Project).filter(Project.id == project_id).first()
+        if not p:
+            return
+
+        st.markdown('<div class="cih-divider"></div>', unsafe_allow_html=True)
+        top_l, top_r = st.columns([3, 1])
+        with top_l:
+            section_header(f"{p.name}", f"{p.project_code} · {p.client_name or 'No client set'}")
+        with top_r:
+            new_status = st.selectbox("Status", PROJECT_STATUSES, index=PROJECT_STATUSES.index(p.status), key="detail_status")
+            if new_status != p.status:
+                p.status = new_status
+                db.flush()
+                st.rerun()
+
+        tabs = st.tabs(["Overview", "Milestones", "Team", "Documents", "Danger Zone"])
+
+        with tabs[0]:
+            st.write("")
+            from utils.styling import kpi_card
+            c1, c2, c3 = st.columns(3)
+            with c1: kpi_card("Progress", f"{p.progress_percent:.0f}%", "⏳", accent="primary")
+            with c2: kpi_card("Budget Used", f"₹{p.budget_used/1e6:,.1f}M", "💰", accent="warning" if p.budget_used > p.budget_total else "success")
+            with c3: kpi_card("Scope", f"{p.floors} floors", "🏗️", accent="neutral")
+            
+            st.write("")
+            st.markdown("##### Update Progress")
+            new_progress = st.slider("Update progress %", 0, 100, int(p.progress_percent))
+            if st.button("Save Progress"):
+                p.progress_percent = new_progress
+                if new_progress >= 100:
+                    p.status = "Completed"
+                    p.actual_completion = date.today()
+                db.flush()
+                st.success("Progress updated.")
+                st.rerun()
+
+        with tabs[1]:
+            milestones = db.query(Milestone).filter(Milestone.project_id == p.id).order_by(Milestone.due_date).all()
+            if milestones:
+                st.markdown("### Project Milestones")
+                for m in milestones:
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([3, 2, 2])
+                        c1.markdown(f"**{m.title}**")
+                        c2.caption(f"Due: {m.due_date}")
+                        statuses = ["Pending", "In Progress", "Done", "Delayed"]
+                        
+                        # Use a unique key for each selectbox
+                        new_status = c3.selectbox(
+                            "Status", 
+                            statuses, 
+                            index=statuses.index(m.status) if m.status in statuses else 0, 
+                            key=f"ms_status_{m.id}", 
+                            label_visibility="collapsed"
+                        )
+                        
+                        if new_status != m.status:
+                            m.status = new_status
+                            if new_status == "Done":
+                                m.completed_date = date.today()
+                            db.flush()
+                            
+                            # Automatically recalculate progress based on milestones
+                            total_ms = len(milestones)
+                            done_ms = sum(1 for x in milestones if x.status == "Done")
+                            auto_progress = (done_ms / total_ms) * 100
+                            p.progress_percent = auto_progress
+                            
+                            if auto_progress >= 100:
+                                p.status = "Completed"
+                                p.actual_completion = date.today()
+                                
+                            db.flush()
+                            st.rerun()
+            with st.form("add_milestone", clear_on_submit=True):
+                c1, c2 = st.columns([2, 1])
+                title = c1.text_input("Milestone title")
+                due = c2.date_input("Due date")
+                if st.form_submit_button("Add Milestone"):
+                    if title:
+                        db.add(Milestone(project_id=p.id, title=title, due_date=due, status="Pending"))
+                        st.rerun()
+
+        with tabs[2]:
+            assignments = db.query(TeamAssignment).filter(TeamAssignment.project_id == p.id).all()
+            for a in assignments:
+                st.markdown(f"• **{a.user.full_name}** — {a.role_on_project}")
+            users = db.query(User).all()
+            with st.form("assign_team", clear_on_submit=True):
+                c1, c2 = st.columns([2, 1])
+                user_choice = c1.selectbox("Team member", [u.full_name for u in users])
+                role = c2.text_input("Role on project", value="Site Supervisor")
+                if st.form_submit_button("Assign"):
+                    u = next(u for u in users if u.full_name == user_choice)
+                    db.add(TeamAssignment(project_id=p.id, user_id=u.id, role_on_project=role))
+                    
+                    # Notify the assigned user
+                    from database.models import Notification
+                    notif = Notification(
+                        project_id=p.id,
+                        notif_type="Team",
+                        severity="info",
+                        message=f"You have been assigned to {p.name} as {role}."
+                    )
+                    db.add(notif)
+                    
+                    st.rerun()
+
+        with tabs[3]:
+            docs = db.query(Document).filter(Document.project_id == p.id).all()
+            if docs:
+                df = pd.DataFrame([{"Document": d.name, "Category": d.category, "Size (KB)": d.size_kb, "Uploaded": d.uploaded_at.date()} for d in docs])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            uploaded = st.file_uploader("Add a document", key=f"doc_upload_{p.id}")
+            if uploaded is not None:
+                db.add(Document(project_id=p.id, name=uploaded.name, category=uploaded.name.split(".")[-1].upper(),
+                                 size_kb=round(uploaded.size / 1024, 1), status="ready",
+                                 uploaded_by=current_user().get("id")))
+                st.success(f"{uploaded.name} added.")
+                st.rerun()
+
+        with tabs[4]:
+            st.warning("Archiving hides the project from active views without deleting its data.")
+            if not p.is_archived:
+                if st.button("Archive this project"):
+                    p.is_archived = True
+                    db.flush()
+                    st.session_state["project_detail_open"] = False
+                    st.rerun()
+            else:
+                if st.button("Restore this project"):
+                    p.is_archived = False
+                    db.flush()
+                    st.rerun()
+
+            user = current_user()
+            if user and user.get("is_admin"):
+                st.markdown('<div class="cih-divider"></div>', unsafe_allow_html=True)
+                st.error("Deleting a project is permanent and will delete all associated data (milestones, materials, budget, etc.).")
+                if st.button("Permanently Delete Project", type="primary", use_container_width=True):
+                    # Phase 3 Hardening: Manual cascading is completely removed.
+                    # Rely purely on SQLAlchemy DB-level CASCADE hooks configured in models.py
+                    db.delete(p)
+                    db.flush()
+                    st.session_state["project_detail_open"] = False
+                    st.success("Project deleted successfully.")
+                    st.rerun()
+
+        if st.button("Close details"):
+            st.session_state["project_detail_open"] = False
+            st.rerun()

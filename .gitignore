@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & secrets
+.env
+.streamlit/secrets.toml
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Local database files
+*.db
+*.sqlite
+cih_local.db
+test_cih.db
+
+# Temporary scratch & refactoring files
+*_bak
+*.log
+scratch_test.py
+fix.py
+refactor*.py
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
